@@ -2,7 +2,7 @@ name: oci-a1-retry
 on:
   schedule:
     # every 30 min (~1 billed min/run => ~1,440 min/month, inside the 2,000 free private-repo minutes)
-    - cron: "7,37 * * * *"
+    - cron: "11,41 * * * *"
   workflow_dispatch:
 concurrency:
   group: oci-a1-retry
