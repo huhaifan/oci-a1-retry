@@ -1,0 +1,91 @@
+name: oci-a1-retry
+on:
+  schedule:
+    # every 30 min (~1 billed min/run => ~1,440 min/month, inside the 2,000 free private-repo minutes)
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+concurrency:
+  group: oci-a1-retry
+  cancel-in-progress: false
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-oci-cli-v1
+      - name: Install OCI CLI
+        run: pip install --quiet oci-cli
+      - name: Write OCI config
+        env:
+          OCI_USER: ${{ secrets.OCI_USER }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_KEY: ${{ secrets.OCI_KEY }}
+          SSH_PUBKEY: ${{ secrets.SSH_PUBKEY }}
+        run: |
+          mkdir -p ~/.oci && chmod 700 ~/.oci
+          printf '%s\n' "$OCI_KEY" > ~/.oci/key.pem
+          printf '%s\n' "$SSH_PUBKEY" > ~/.oci/ssh.pub
+          {
+            echo "[DEFAULT]"
+            echo "user=$OCI_USER"
+            echo "fingerprint=$OCI_FINGERPRINT"
+            echo "tenancy=$OCI_TENANCY"
+            echo "region=$OCI_REGION"
+            echo "key_file=$HOME/.oci/key.pem"
+          } > ~/.oci/config
+          chmod 600 ~/.oci/config ~/.oci/key.pem
+      - name: Check / launch A1
+        env:
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+          OCI_IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}
+          SUPPRESS_LABEL_WARNING: "True"
+          OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
+        run: |
+          set -u
+          NAME=a1-ubuntu
+          AD="aYhu:AP-HYDERABAD-1-AD-1"
+          set +e
+          EX=$(oci compute instance list -c "$OCI_TENANCY" --display-name $NAME --all \
+            --query 'data[?"lifecycle-state"!=`TERMINATED` && "lifecycle-state"!=`TERMINATING`] | [0].id' --raw-output 2>&1)
+          LRC=$?
+          set -e
+          if [ $LRC -ne 0 ]; then echo "LIST_ERROR: $(echo "$EX" | tr '\n' ' ' | grep -o '"message": "[^"]*"' | head -1)"; exit 1; fi
+          if [ -n "$EX" ] && [ "$EX" != "null" ]; then
+            ST=$(oci compute instance get --instance-id "$EX" --query 'data."lifecycle-state"' --raw-output 2>/dev/null || true)
+            IP=$(oci compute instance list-vnics --instance-id "$EX" --query 'data[0]."public-ip"' --raw-output 2>/dev/null || true)
+            echo "INSTANCE_EXISTS name=$NAME state=$ST public_ip=$IP"
+            echo "### a1-ubuntu exists: state=$ST ip=$IP" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          set +e
+          OUT=$(oci compute instance launch --no-retry --read-timeout 120 -c "$OCI_TENANCY" \
+            --availability-domain "$AD" --display-name $NAME \
+            --shape VM.Standard.A1.Flex --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+            --image-id "$OCI_IMAGE_ID" --boot-volume-size-in-gbs 100 --subnet-id "$OCI_SUBNET_ID" \
+            --assign-public-ip true --ssh-authorized-keys-file ~/.oci/ssh.pub \
+            --query 'data."lifecycle-state"' --raw-output 2>&1)
+          RC=$?
+          set -e
+          FLAT=$(echo "$OUT" | tr '\n' ' ')
+          MSG=$(echo "$FLAT" | grep -o '"message": "[^"]*"' | head -1 || true)
+          CODE=$(echo "$FLAT" | grep -o '"status": [0-9]*' | head -1 || true)
+          if [ $RC -eq 0 ]; then
+            echo "LAUNCHED state=$OUT"; echo "### LAUNCHED a1-ubuntu ($OUT)" >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          if echo "$FLAT" | grep -qiE 'Out of host capacity|Out of capacity|TooManyRequests|"status": 429|"status": 500|"status": 503|InternalError|ServiceUnavailable|timed out'; then
+            echo "NO_CAPACITY_OR_TRANSIENT $CODE $MSG"; echo "no capacity: $CODE $MSG" >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          echo "LAUNCH_ERROR rc=$RC $CODE $MSG"
+          exit 1
+      - name: Cleanup
+        if: always()
+        run: rm -rf ~/.oci
