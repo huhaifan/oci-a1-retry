@@ -1,8 +1,8 @@
 name: oci-a1-retry
 on:
   schedule:
-    # every 30 min (~1 billed min/run => ~1,440 min/month, inside the 2,000 free private-repo minutes)
-    - cron: "11,41 * * * *"
+    # every 5 min (public repo: unlimited Actions minutes)
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 concurrency:
   group: oci-a1-retry
@@ -61,9 +61,8 @@ jobs:
           if [ $LRC -ne 0 ]; then echo "LIST_ERROR: $(echo "$EX" | tr '\n' ' ' | grep -o '"message": "[^"]*"' | head -1)"; exit 1; fi
           if [ -n "$EX" ] && [ "$EX" != "null" ]; then
             ST=$(oci compute instance get --instance-id "$EX" --query 'data."lifecycle-state"' --raw-output 2>/dev/null || true)
-            IP=$(oci compute instance list-vnics --instance-id "$EX" --query 'data[0]."public-ip"' --raw-output 2>/dev/null || true)
-            echo "INSTANCE_EXISTS name=$NAME state=$ST public_ip=$IP"
-            echo "### a1-ubuntu exists: state=$ST ip=$IP" >> "$GITHUB_STEP_SUMMARY"
+            echo "INSTANCE_EXISTS name=$NAME state=$ST"
+            echo "### a1-ubuntu exists: state=$ST" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           set +e
